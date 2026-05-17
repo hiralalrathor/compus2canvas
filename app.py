@@ -786,6 +786,7 @@ class App(BaseHTTPRequestHandler):
             return
         event_id = parse_qs(urlparse(self.path).query).get("event_id", [""])[0]
         with get_db() as db:
+            events = db.execute("SELECT id,title FROM events ORDER BY title").fetchall()
             event_filter = ""
             params = []
             event_title = "All Event Participants"
@@ -807,8 +808,21 @@ class App(BaseHTTPRequestHandler):
                 """,
                 params,
             ).fetchall()
+        selected = str(event_id)
+        options = "<option value=''>All Events</option>" + "".join(
+            f"<option value='{event['id']}' {'selected' if str(event['id']) == selected else ''}>{esc(event['title'])}</option>"
+            for event in events
+        )
+        filter_form = f"""
+        <form class="inline filter-form" method="get" action="/admin/participants">
+            <label>Choose Event
+                <select name="event_id">{options}</select>
+            </label>
+            <button type="submit">Show Participants</button>
+        </form>
+        """
         table = participant_rows(rows, include_event=True)
-        body = f"<section class='panel'><h1>{esc(event_title)}</h1><table><thead>{participant_head(include_event=True)}</thead><tbody>{table}</tbody></table></section>"
+        body = f"<section class='panel'><h1>{esc(event_title)}</h1>{filter_form}<table><thead>{participant_head(include_event=True)}</thead><tbody>{table}</tbody></table></section>"
         return self.send_html(layout("Participants", body, user))
 
     def admin_registrations(self):
@@ -819,7 +833,7 @@ class App(BaseHTTPRequestHandler):
             rows = db.execute("SELECT r.*, u.name student, u.email, e.title event_title FROM registrations r JOIN users u ON u.id=r.user_id JOIN events e ON e.id=r.event_id ORDER BY r.registered_at DESC").fetchall()
         table = "".join(
             f"""<tr><td>{esc(r['student'])}<small>{esc(r['email'])}</small></td><td>{esc(r['event_title'])}</td><td><span class="badge">{esc(r['status'])}</span></td>
-            <td><form class="inline" method="post" action="/admin/registration-status"><input type="hidden" name="registration_id" value="{r['id']}"><button name="status" value="Confirmed">Approve</button><button class="danger" name="status" value="Rejected">Reject</button></form></td></tr>"""
+            <td><form class="inline" method="post" action="/admin/registration-status"><input type="hidden" name="registration_id" value="{r['id']}"><button name="status" value="Confirmed">Confirmed</button><button class="danger" name="status" value="Rejected">Rejected</button><button class="pending" name="status" value="Pending">Pending</button></form></td></tr>"""
             for r in rows
         )
         return self.send_html(layout("Registrations", f"<section class='panel'><h1>Registration Approvals</h1><table><thead><tr><th>Student</th><th>Event</th><th>Status</th><th>Action</th></tr></thead><tbody>{table}</tbody></table></section>", user))
@@ -996,7 +1010,7 @@ class App(BaseHTTPRequestHandler):
             db.execute("UPDATE registrations SET status=? WHERE id=?", (status, reg_id))
             if status == "Confirmed":
                 self.issue_ticket(db, reg_id)
-            elif status == "Rejected":
+            elif status in ("Rejected", "Pending"):
                 db.execute("UPDATE tickets SET status='Cancelled' WHERE registration_id=?", (reg_id,))
         return self.redirect("/admin/registrations")
 
