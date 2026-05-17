@@ -7,7 +7,7 @@ A creative college event management website built with Python's `http.server`, S
 Use the bundled Python in this Codex workspace:
 
 ```powershell
-& 'C:\Users\hiral\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' app.py
+& 'C:\Users\dependencies\python\python.exe' app.py
 ```
 
 Then open:
