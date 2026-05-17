@@ -5,6 +5,7 @@ from pathlib import Path
 import hashlib
 import hmac
 import html
+import json
 import mimetypes
 import os
 import secrets
@@ -101,6 +102,7 @@ def init_db():
                 description TEXT NOT NULL,
                 image_url TEXT,
                 category TEXT NOT NULL,
+                target_department TEXT NOT NULL DEFAULT 'All',
                 venue TEXT NOT NULL,
                 event_date TEXT NOT NULL,
                 end_date TEXT,
@@ -176,6 +178,8 @@ def migrate_db(db):
     if "end_date" not in event_columns:
         db.execute("ALTER TABLE events ADD COLUMN end_date TEXT")
         db.execute("UPDATE events SET end_date=event_date WHERE end_date IS NULL OR end_date=''")
+    if "target_department" not in event_columns:
+        db.execute("ALTER TABLE events ADD COLUMN target_department TEXT NOT NULL DEFAULT 'All'")
 
 
 def seed_data(db):
@@ -195,6 +199,7 @@ def seed_data(db):
             "A full-day makers festival with coding arenas, AI demos, hardware showcases, and lightning talks.",
             "https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=1400&q=80",
             "Technical",
+            "All",
             "Main Auditorium",
             "2026-08-20",
             "2026-08-20",
@@ -210,6 +215,7 @@ def seed_data(db):
             "A creative sprint for posters, reels, campus radio, and rapid storytelling.",
             "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1400&q=80",
             "Creative",
+            "Information Technology",
             "Studio Block",
             "2026-09-04",
             "2026-09-04",
@@ -223,8 +229,8 @@ def seed_data(db):
     ]
     db.executemany(
         """
-        INSERT INTO events(title,description,image_url,category,venue,event_date,end_date,start_time,end_time,capacity,status,approval_required,organizer_id)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO events(title,description,image_url,category,target_department,venue,event_date,end_date,start_time,end_time,capacity,status,approval_required,organizer_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         events,
     )
@@ -301,8 +307,34 @@ def layout(title, body, user=None, message=""):
         {profile}
     </header>
     <main>{banner}{body}</main>
+    {chatbot_widget(user)}
 </body>
 </html>"""
+
+
+def chatbot_widget(user):
+    if not user or user["role"] != "student":
+        return ""
+    return """
+    <section class="chatbot" data-chatbot>
+        <button class="chatbot-launch" type="button" aria-label="Open event assistant">CC</button>
+        <div class="chatbot-panel" hidden>
+            <div class="chatbot-head">
+                <strong>Campus Care</strong>
+                <button type="button" aria-label="Close event assistant">x</button>
+            </div>
+            <div class="chatbot-messages">
+                <p class="bot">Hi. Choose an option and I will help you find the right event.</p>
+            </div>
+            <div class="chatbot-options">
+                <button type="button" data-intent="suggest">Suggest event</button>
+                <button type="button" data-intent="department">My department events</button>
+                <button type="button" data-intent="tickets">My tickets</button>
+            </div>
+        </div>
+    </section>
+    <script src="/static/chatbot.js"></script>
+    """
 
 
 class App(BaseHTTPRequestHandler):
@@ -332,6 +364,14 @@ class App(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         if cookie:
             self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def send_json(self, payload, status=200):
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -370,10 +410,13 @@ class App(BaseHTTPRequestHandler):
             "/dashboard": self.dashboard,
             "/profile": self.profile_page,
             "/organizer/events": self.organizer_events,
+            "/organizer/participants": self.organizer_participants,
             "/admin/events": self.admin_events,
+            "/admin/participants": self.admin_participants,
             "/admin/registrations": self.admin_registrations,
             "/admin/schedules": self.admin_schedules,
             "/admin/sponsors": self.admin_sponsors,
+            "/chatbot": self.chatbot_reply,
         }
         if path == "/logout":
             return self.redirect("/", "cems_session=; Path=/; Max-Age=0; HttpOnly")
@@ -519,6 +562,7 @@ class App(BaseHTTPRequestHandler):
             <section class="grid four">
                 <a class="tile" href="/admin/events">Event Approvals</a>
                 <a class="tile" href="/admin/registrations">Registrations</a>
+                <a class="tile" href="/admin/participants">Participants</a>
                 <a class="tile" href="/admin/schedules">Schedules</a>
                 <a class="tile" href="/admin/sponsors">Sponsors</a>
             </section></section>
@@ -577,6 +621,44 @@ class App(BaseHTTPRequestHandler):
         cards = "".join(event_card(event) for event in events) or "<p>No approved events available.</p>"
         return self.send_html(layout("Events", f"<section class='section-head'><h1>Campus Events</h1><span>Freshly curated for your crew.</span></section><section class='grid'>{cards}</section>", user))
 
+    def chatbot_reply(self):
+        user = self.require_user(["student"])
+        if not user:
+            return
+        intent = parse_qs(urlparse(self.path).query).get("intent", ["suggest"])[0]
+        with get_db() as db:
+            if intent == "tickets":
+                count = db.execute(
+                    "SELECT COUNT(*) total FROM tickets t JOIN registrations r ON r.id=t.registration_id WHERE r.user_id=? AND t.status='Valid'",
+                    (user["id"],),
+                ).fetchone()["total"]
+                return self.send_json({"reply": f"You have {count} valid ticket(s). Open your dashboard to view or print them.", "link": "/dashboard"})
+
+            rows = db.execute(
+                """
+                SELECT e.*,
+                (SELECT COUNT(*) FROM registrations r WHERE r.event_id=e.id AND r.status IN ('Confirmed','Pending')) registrations
+                FROM events e
+                WHERE e.status='Approved'
+                AND (e.target_department='All' OR e.target_department=?)
+                AND (SELECT COUNT(*) FROM registrations r WHERE r.event_id=e.id AND r.status IN ('Confirmed','Pending')) < e.capacity
+                AND e.id NOT IN (
+                    SELECT event_id FROM registrations WHERE user_id=? AND status != 'Cancelled'
+                )
+                ORDER BY CASE WHEN e.target_department=? THEN 0 ELSE 1 END, e.event_date, e.start_time
+                LIMIT 3
+                """,
+                (user["department"], user["id"], user["department"]),
+            ).fetchall()
+        if not rows:
+            return self.send_json({"reply": "I could not find a fresh matching event right now. Check the Events page for all open events.", "link": "/events"})
+        if intent == "department":
+            department_events = [row for row in rows if row["target_department"] == user["department"]]
+            rows = department_events or rows
+        first = rows[0]
+        reply = f"I suggest {first['title']} for {event_dates(first)} at {first['venue']}. It matches {first['target_department']} and has seats available."
+        return self.send_json({"reply": reply, "link": f"/events/{first['id']}"})
+
     def event_detail(self, path, user):
         event_id = path.rsplit("/", 1)[-1]
         with get_db() as db:
@@ -601,6 +683,7 @@ class App(BaseHTTPRequestHandler):
                 <dl>
                     <div><dt>Dates</dt><dd>{esc(event_dates(event))}</dd></div>
                     <div><dt>Time</dt><dd>{esc(event_time_range(event))}</dd></div>
+                    <div><dt>Department</dt><dd>{esc(event['target_department'])}</dd></div>
                     <div><dt>Venue</dt><dd>{esc(event['venue'])}</dd></div>
                     <div><dt>Seats</dt><dd>{left} of {event['capacity']}</dd></div>
                 </dl>
@@ -632,13 +715,17 @@ class App(BaseHTTPRequestHandler):
             return
         with get_db() as db:
             rows = db.execute("SELECT * FROM events WHERE organizer_id=? ORDER BY created_at DESC", (user["id"],)).fetchall()
-        event_rows = "".join(f"<tr><td>{esc(r['title'])}</td><td>{esc(event_dates(r))}</td><td>{esc(r['venue'])}</td><td><span class='badge'>{esc(r['status'])}</span></td><td>{esc(r['admin_remarks'])}</td></tr>" for r in rows)
+        event_rows = "".join(
+            f"<tr><td>{esc(r['title'])}</td><td>{esc(event_dates(r))}</td><td>{esc(r['target_department'])}</td><td>{esc(r['venue'])}</td><td><span class='badge'>{esc(r['status'])}</span></td><td>{esc(r['admin_remarks'])}</td><td><a class='button small' href='/organizer/participants?event_id={r['id']}'>Participants</a></td></tr>"
+            for r in rows
+        )
         body = f"""
         <section class="panel">
             <h1>Submit Event Proposal</h1>
             <form class="wide" method="post" action="/organizer/events">
                 <label>Title <input name="title" required></label>
                 <label>Category <input name="category" required></label>
+                <label>Department <select name="target_department"><option>All</option><option>Computer Science</option><option>Information Technology</option><option>Electronics</option><option>Mechanical</option><option>Civil</option><option>Administration</option></select></label>
                 <label>Venue <input name="venue" required></label>
                 <label>Image URL <input name="image_url" type="url" placeholder="https://example.com/photo.jpg"></label>
                 <label>Start Date <input name="event_date" type="date" required></label>
@@ -651,9 +738,33 @@ class App(BaseHTTPRequestHandler):
                 <button type="submit">Save Event</button>
             </form>
         </section>
-        <section class="panel"><h2>My Events</h2><table><thead><tr><th>Title</th><th>Date</th><th>Venue</th><th>Status</th><th>Remarks</th></tr></thead><tbody>{event_rows}</tbody></table></section>
+        <section class="panel"><h2>My Events</h2><table><thead><tr><th>Title</th><th>Date</th><th>Department</th><th>Venue</th><th>Status</th><th>Remarks</th><th>People</th></tr></thead><tbody>{event_rows}</tbody></table></section>
         """
         return self.send_html(layout("Organizer Events", body, user))
+
+    def organizer_participants(self):
+        user = self.require_user(["organizer"])
+        if not user:
+            return
+        event_id = parse_qs(urlparse(self.path).query).get("event_id", [""])[0]
+        with get_db() as db:
+            event = db.execute("SELECT * FROM events WHERE id=? AND organizer_id=?", (event_id, user["id"])).fetchone()
+            if not event:
+                return self.error_page(404, "Event not found.")
+            rows = db.execute(
+                """
+                SELECT u.id student_id, u.name, u.email, u.department, r.status, r.registered_at, t.ticket_code
+                FROM registrations r
+                JOIN users u ON u.id=r.user_id
+                LEFT JOIN tickets t ON t.registration_id=r.id
+                WHERE r.event_id=?
+                ORDER BY r.registered_at DESC
+                """,
+                (event_id,),
+            ).fetchall()
+        table = participant_rows(rows)
+        body = f"<section class='panel'><h1>{esc(event['title'])} Participants</h1><p class='muted'>{esc(event_dates(event))} | {esc(event['target_department'])}</p><table><thead>{participant_head()}</thead><tbody>{table}</tbody></table></section>"
+        return self.send_html(layout("Participants", body, user))
 
     def admin_events(self):
         user = self.require_user(["admin"])
@@ -662,11 +773,42 @@ class App(BaseHTTPRequestHandler):
         with get_db() as db:
             rows = db.execute("SELECT e.*, u.name organizer FROM events e JOIN users u ON u.id=e.organizer_id WHERE e.status='Pending' ORDER BY e.created_at DESC").fetchall()
         table = "".join(
-            f"""<tr><td>{esc(r['title'])}<small>{esc(r['description'])}</small></td><td>{esc(r['organizer'])}</td><td>{esc(event_dates(r))}</td><td>{esc(r['capacity'])}</td><td><span class="badge">{esc(r['status'])}</span></td>
+            f"""<tr><td>{esc(r['title'])}<small>{esc(r['description'])}</small></td><td>{esc(r['organizer'])}</td><td>{esc(event_dates(r))}</td><td>{esc(r['target_department'])}</td><td>{esc(r['capacity'])}</td><td><span class="badge">{esc(r['status'])}</span></td>
             <td><form class="inline" method="post" action="/admin/event-status"><input type="hidden" name="event_id" value="{r['id']}"><input name="remarks" placeholder="Remarks"><button name="status" value="Approved">Approve</button><button class="danger" name="status" value="Rejected">Reject</button></form></td></tr>"""
             for r in rows
-        ) or "<tr><td colspan='6'>No events are waiting for approval.</td></tr>"
-        return self.send_html(layout("Admin Events", f"<section class='panel'><h1>Pending Event Approvals</h1><table><thead><tr><th>Event</th><th>Organizer</th><th>Date</th><th>Capacity</th><th>Status</th><th>Action</th></tr></thead><tbody>{table}</tbody></table></section>", user))
+        ) or "<tr><td colspan='7'>No events are waiting for approval.</td></tr>"
+        return self.send_html(layout("Admin Events", f"<section class='panel'><h1>Pending Event Approvals</h1><p><a class='button small' href='/admin/participants'>View All Participants</a></p><table><thead><tr><th>Event</th><th>Organizer</th><th>Date</th><th>Department</th><th>Capacity</th><th>Status</th><th>Action</th></tr></thead><tbody>{table}</tbody></table></section>", user))
+
+    def admin_participants(self):
+        user = self.require_user(["admin"])
+        if not user:
+            return
+        event_id = parse_qs(urlparse(self.path).query).get("event_id", [""])[0]
+        with get_db() as db:
+            event_filter = ""
+            params = []
+            event_title = "All Event Participants"
+            if event_id:
+                event = db.execute("SELECT title FROM events WHERE id=?", (event_id,)).fetchone()
+                if event:
+                    event_title = f"{event['title']} Participants"
+                    event_filter = "WHERE r.event_id=?"
+                    params.append(event_id)
+            rows = db.execute(
+                f"""
+                SELECT u.id student_id, u.name, u.email, u.department, r.status, r.registered_at, t.ticket_code, e.title event_title
+                FROM registrations r
+                JOIN users u ON u.id=r.user_id
+                JOIN events e ON e.id=r.event_id
+                LEFT JOIN tickets t ON t.registration_id=r.id
+                {event_filter}
+                ORDER BY e.title, r.registered_at DESC
+                """,
+                params,
+            ).fetchall()
+        table = participant_rows(rows, include_event=True)
+        body = f"<section class='panel'><h1>{esc(event_title)}</h1><table><thead>{participant_head(include_event=True)}</thead><tbody>{table}</tbody></table></section>"
+        return self.send_html(layout("Participants", body, user))
 
     def admin_registrations(self):
         user = self.require_user(["admin"])
@@ -768,6 +910,8 @@ class App(BaseHTTPRequestHandler):
             event = db.execute("SELECT * FROM events WHERE id=? AND status='Approved'", (event_id,)).fetchone()
             if not event:
                 return self.error_page(404, "Event not found.")
+            if event["target_department"] != "All" and event["target_department"] != user["department"]:
+                return self.error_page(403, "This event is only open for the selected department.")
             existing = db.execute("SELECT * FROM registrations WHERE event_id=? AND user_id=?", (event_id, user["id"])).fetchone()
             if existing and existing["status"] != "Cancelled":
                 return self.redirect("/dashboard")
@@ -809,14 +953,15 @@ class App(BaseHTTPRequestHandler):
         with get_db() as db:
             db.execute(
                 """
-                INSERT INTO events(title,description,image_url,category,venue,event_date,end_date,start_time,end_time,capacity,status,approval_required,organizer_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO events(title,description,image_url,category,target_department,venue,event_date,end_date,start_time,end_time,capacity,status,approval_required,organizer_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     form_value(data, "title"),
                     form_value(data, "description"),
                     form_value(data, "image_url"),
                     form_value(data, "category"),
+                    form_value(data, "target_department", "All"),
                     form_value(data, "venue"),
                     start_date,
                     end_date,
@@ -901,6 +1046,7 @@ def event_card(event):
         <img src="{esc(event['image_url'])}" alt="{esc(event['title'])}">
         <div>
             <span class="badge">{esc(event['category'])}</span>
+            <span class="badge soft">{esc(event['target_department'])}</span>
             <h3>{esc(event['title'])}</h3>
             <p>{esc(event['description'])}</p>
             <footer><span>{esc(event_dates(event))} at {esc(event['venue'])}</span><span>{left} seats</span></footer>
@@ -908,6 +1054,27 @@ def event_card(event):
         </div>
     </article>
     """
+
+
+def participant_head(include_event=False):
+    event_col = "<th>Event</th>" if include_event else ""
+    return f"<tr>{event_col}<th>Student ID</th><th>Name</th><th>Email</th><th>Department</th><th>Status</th><th>Ticket</th><th>Registered</th></tr>"
+
+
+def participant_rows(rows, include_event=False):
+    if not rows:
+        colspan = 8 if include_event else 7
+        return f"<tr><td colspan='{colspan}'>No participants yet.</td></tr>"
+    html_rows = ""
+    for row in rows:
+        event_col = f"<td>{esc(row['event_title'])}</td>" if include_event else ""
+        html_rows += (
+            f"<tr>{event_col}<td>{esc(row['student_id'])}</td><td>{esc(row['name'])}</td>"
+            f"<td>{esc(row['email'])}</td><td>{esc(row['department'])}</td>"
+            f"<td><span class='badge'>{esc(row['status'])}</span></td><td>{esc(row['ticket_code'])}</td>"
+            f"<td>{esc(row['registered_at'])}</td></tr>"
+        )
+    return html_rows
 
 
 if __name__ == "__main__":
