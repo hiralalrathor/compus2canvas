@@ -248,6 +248,11 @@ button:hover {
     background: var(--coral);
 }
 
+.pending {
+    color: var(--ink);
+    background: var(--lime);
+}
+
 .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
@@ -401,6 +406,14 @@ textarea {
     align-items: center;
     gap: 0.5rem;
     flex-wrap: wrap;
+}
+
+.filter-form {
+    margin: 1rem 0;
+}
+
+.filter-form label {
+    min-width: min(24rem, 100%);
 }
 
 table {
