@@ -14,12 +14,13 @@ import time
 
 
 BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "data" / "college_events.db"
+DB_PATH = Path(os.environ.get("DATABASE_PATH", BASE_DIR / "data" / "college_events.db"))
 STATIC_DIR = BASE_DIR / "static"
 SECRET = os.environ.get("CEMS_SECRET", "change-this-secret-for-production")
 
 
 def get_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -81,7 +82,7 @@ def read_session(cookie_header):
 
 
 def init_db():
-    DB_PATH.parent.mkdir(exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as db:
         db.executescript(
             """
