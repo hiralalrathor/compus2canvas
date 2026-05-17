@@ -23,3 +23,14 @@ http://localhost:8000
 - Student: `student@college.edu` / `student123`
 
 The SQLite database is created automatically in `data/college_events.db` on first run.
+
+## Deploy on Render
+
+This repo includes `render.yaml`, `runtime.txt`, and `requirements.txt`.
+
+On Render, create a Python Web Service and use:
+
+- Build command: `pip install -r requirements.txt`
+- Start command: `python app.py`
+
+Render provides the `PORT` environment variable automatically, and `app.py` already uses it.
